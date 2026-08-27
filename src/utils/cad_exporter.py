@@ -26,7 +26,9 @@ class CADExporter:
             "3mf": "3D Manufacturing Format (modern replacement for STL with metadata)",
             "scad": "OpenSCAD source code (fully parametric)",
             "dxf": "Drawing Exchange Format (for 2D designs)",
-            "svg": "Scalable Vector Graphics (for 2D designs)"
+            "svg": "Scalable Vector Graphics (for 2D designs)",
+            "stl": "Standard Triangle Language (for 3D printing)",
+            "off": "Object File Format",
         }
     
     def export_model(self, scad_file: str, output_format: str = "csg", 
