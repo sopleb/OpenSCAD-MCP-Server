@@ -1,0 +1,18 @@
+# Generated models and renders
+scad/*.scad
+scad/*.stl
+scad/*.csg
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+*.egg-info/
+
+# Local configuration
+.env
+
+# CUDA MVS checkout
+cuda-mvs/

@@ -1,63 +1,47 @@
 <metadata>
-  author: devin-ai-integration
-  timestamp: 2025-03-21T01:30:00Z
-  version: 1.0.0
-  related-files: [/src/ai/ai_service.py, /src/models/code_generator.py, /src/nlp/parameter_extractor.py]
-  prompt: "Build an MCP server for OpenSCAD"
+  related-files: [/src/mcp_bridge/prompts.py, /src/mcp_bridge/delegation.py, /src/models/code_generator.py, /src/models/cuda_mvs.py]
+  decisions: [/rtfmd/decisions/client-supplied-reasoning.md]
 </metadata>
 
 <exploration>
-  The main application was designed to implement a Model Context Protocol (MCP) server for OpenSCAD integration. Several approaches were considered:
-  
-  1. Using a standalone server with direct OpenSCAD CLI calls
-  2. Implementing a web service with REST API
-  3. Creating an MCP-compliant server with FastAPI
-  
-  The MCP-compliant FastAPI approach was selected for its alignment with the project requirements and modern API design.
+  The server layer was rewritten because the previous one could not run. It
+  imported MCPServer, MCPTool, MCPToolCall and MCPToolCallResult from `mcp`, an
+  API the Python SDK has never exported, and reached a bespoke FastAPI
+  POST /tool_call endpoint rather than an MCP transport. Import failed before
+  any of that mattered: the module pulled in a file moved to old/, used five
+  names it never imported, and built CUDAMultiViewStereo at module scope, whose
+  constructor raised FileNotFoundError wherever CUDA MVS was not compiled.
+
+  Three server shapes were considered:
+
+  1. Repair the FastAPI shim in place. Rejected: it is not MCP, so no client
+     could reach it without a custom adapter.
+  2. Keep FastAPI for a web UI and add MCP alongside. Rejected as scope; the web
+     interface remains in src/visualization/ and is not registered.
+  3. Rewrite on mcp.server.MCPServer over stdio. Chosen.
 </exploration>
 
-<mental-model>
-  The main application operates on a "tool-based MCP service" paradigm, where each capability is exposed as an MCP tool that can be called by AI assistants. This mental model aligns with the MCP specification and provides a clean separation of concerns.
-</mental-model>
+<reasoning>
+  SDK v2 renamed FastMCP to MCPServer and moved it to mcp.server; Context comes
+  from mcp.server.mcpserver. Tools declare their arguments through type hints and
+  Annotated Field descriptions, so the schema the client sees is the signature.
 
-<pattern-recognition>
-  The implementation uses the Facade pattern to provide a simple interface to the complex subsystems (parameter extraction, code generation, OpenSCAD wrapper, etc.). This pattern simplifies the client interface and decouples the subsystems from clients.
-</pattern-recognition>
+  Components initialise through get_cuda_mvs, get_printer_interface and
+  get_remote_manager rather than at import. A machine with no CUDA MVS build, no
+  printers on the network and no .env still serves every OpenSCAD tool. This was
+  the specific defect that made the old server unstartable.
 
-<trade-off>
-  Options considered:
-  1. Monolithic application with tightly coupled components
-  2. Microservices architecture with separate services
-  3. Modular monolith with clear component boundaries
-  
-  The modular monolith approach was chosen because:
-  - Simpler deployment and operation
-  - Lower latency for inter-component communication
-  - Easier to develop and debug
-  - Still maintains good separation of concerns
-</trade-off>
+  Tools return status values instead of raising. A caller that receives
+  compile_error with OpenSCAD's diagnostics can fix the reported line and call
+  again, which is the loop the whole design depends on: the model on the other
+  end is doing the authoring, so it needs the compiler's answer, not a stack
+  trace. missing_camera_poses and cuda_mvs_missing work the same way.
 
-<domain-knowledge>
-  The implementation required understanding of:
-  - Model Context Protocol (MCP) specification
-  - FastAPI framework
-  - OpenSCAD command-line interface
-  - 3D modeling and printing workflows
-</domain-knowledge>
+  Two paths need the client to accept a server-initiated request, and neither
+  may assume it. _progress swallows delivery failures. approve_images catches
+  NoBackChannelError and returns elicitation_unavailable with the image list, so
+  the caller decides instead. That is the same constraint that rules out
+  sampling, met the same way: fall back to the tool call already in flight.
 
-<technical-debt>
-  The current implementation has some limitations:
-  - In-memory storage of models (not persistent)
-  - Basic error handling
-  - Limited printer discovery capabilities
-  
-  Future improvements planned:
-  - Persistent storage for models
-  - Enhanced error handling and reporting
-  - More robust printer discovery and management
-</technical-debt>
-
-<knowledge-refs>
-  [OpenSCAD Basics](/rtfmd/knowledge/openscad/openscad-basics.md) - Last updated 2025-03-21
-  [AI-Driven Code Generation](/rtfmd/decisions/ai-driven-code-generation.md) - Last updated 2025-03-21
-</knowledge-refs>
+  Logging goes to stderr because stdout carries the protocol.
+</reasoning>

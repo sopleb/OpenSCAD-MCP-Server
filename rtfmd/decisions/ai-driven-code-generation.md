@@ -1,3 +1,8 @@
+> **Superseded** by [client-supplied-reasoning.md](client-supplied-reasoning.md).
+> The hybrid pattern-matching engine described here was removed. Reasoning now
+> comes from whatever MCP client is connected, and the server runs no model.
+> Kept for the record.
+
 # AI-Driven Code Generation for OpenSCAD
 
 <metadata>
