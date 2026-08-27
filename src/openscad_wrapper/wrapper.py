@@ -1,418 +1,165 @@
+"""Driver for the OpenSCAD command line.
+
+Writes SCAD source, compiles it, and renders previews. Shape templates live in
+src/models/scad_templates/basic_shapes.scad rather than being duplicated here.
+"""
+
+from __future__ import annotations
+
+import logging
 import os
 import subprocess
 import uuid
-import logging
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
+CAMERA_VIEWS = {
+    "front": "0,0,0,0,0,0,50",
+    "top": "0,0,0,90,0,0,50",
+    "right": "0,0,0,0,90,0,50",
+    "perspective": "40,30,30,55,0,25,100",
+}
+
+DEFAULT_IMAGE_SIZE = "800,600"
+
+
+class OpenSCADNotFound(RuntimeError):
+    """The openscad binary is missing from PATH and from OPENSCAD_PATH."""
+
+
+class OpenSCADError(RuntimeError):
+    """OpenSCAD rejected the source. Carries the compiler diagnostics."""
+
+    def __init__(self, message: str, diagnostics: str = ""):
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
 class OpenSCADWrapper:
-    """
-    Wrapper for OpenSCAD command-line interface.
-    Provides methods to generate SCAD code, STL files, and preview images.
-    """
-    
-    def __init__(self, scad_dir: str, output_dir: str):
-        """
-        Initialize the OpenSCAD wrapper.
-        
-        Args:
-            scad_dir: Directory to store SCAD files
-            output_dir: Directory to store output files (STL, PNG)
-        """
+    """Runs OpenSCAD over SCAD files and collects its output."""
+
+    def __init__(self, scad_dir: str, output_dir: str, openscad_path: str = "openscad"):
         self.scad_dir = scad_dir
         self.output_dir = output_dir
+        self.openscad_path = openscad_path
         self.stl_dir = os.path.join(output_dir, "stl")
         self.preview_dir = os.path.join(output_dir, "preview")
-        
-        # Create directories if they don't exist
-        os.makedirs(self.scad_dir, exist_ok=True)
-        os.makedirs(self.stl_dir, exist_ok=True)
-        os.makedirs(self.preview_dir, exist_ok=True)
-        
-        # Basic shape templates
-        self.shape_templates = {
-            "cube": self._cube_template,
-            "sphere": self._sphere_template,
-            "cylinder": self._cylinder_template,
-            "box": self._box_template,
-            "rounded_box": self._rounded_box_template,
-        }
-    
-    def generate_scad_code(self, model_type: str, parameters: Dict[str, Any]) -> str:
-        """
-        Generate OpenSCAD code for a given model type and parameters.
-        
-        Args:
-            model_type: Type of model to generate (cube, sphere, cylinder, etc.)
-            parameters: Dictionary of parameters for the model
-            
-        Returns:
-            Path to the generated SCAD file
-        """
-        model_id = str(uuid.uuid4())
+
+        for directory in (self.scad_dir, self.stl_dir, self.preview_dir):
+            os.makedirs(directory, exist_ok=True)
+
+    def generate_scad(self, scad_code: str, model_id: str | None = None) -> str:
+        """Write SCAD source to disk and return its path."""
+        model_id = model_id or str(uuid.uuid4())
         scad_file = os.path.join(self.scad_dir, f"{model_id}.scad")
-        
-        # Get the template function for the model type
-        template_func = self.shape_templates.get(model_type)
-        if not template_func:
-            raise ValueError(f"Unsupported model type: {model_type}")
-        
-        # Generate SCAD code using the template
-        scad_code = template_func(parameters)
-        
-        # Write SCAD code to file
-        with open(scad_file, 'w') as f:
+        with open(scad_file, "w") as f:
             f.write(scad_code)
-        
-        logger.info(f"Generated SCAD file: {scad_file}")
+        logger.info("Wrote %s", scad_file)
         return scad_file
-        
-    def generate_scad(self, scad_code: str, model_id: str) -> str:
+
+    def validate(self, scad_file: str, parameters: dict[str, Any] | None = None) -> str:
+        """Compile without keeping the output, to surface syntax and geometry errors.
+
+        Returns the compiler's stderr, which holds warnings even on success.
         """
-        Save OpenSCAD code to a file with a specific model ID.
-        
-        Args:
-            scad_code: OpenSCAD code to save
-            model_id: ID to use for the file name
-            
-        Returns:
-            Path to the saved SCAD file
-        """
-        scad_file = os.path.join(self.scad_dir, f"{model_id}.scad")
-        
-        # Write SCAD code to file
-        with open(scad_file, 'w') as f:
-            f.write(scad_code)
-        
-        logger.info(f"Generated SCAD file: {scad_file}")
-        return scad_file
-    
-    def update_scad_code(self, model_id: str, parameters: Dict[str, Any]) -> str:
-        """
-        Update an existing SCAD file with new parameters.
-        
-        Args:
-            model_id: ID of the model to update
-            parameters: New parameters for the model
-            
-        Returns:
-            Path to the updated SCAD file
-        """
-        scad_file = os.path.join(self.scad_dir, f"{model_id}.scad")
-        if not os.path.exists(scad_file):
-            raise FileNotFoundError(f"SCAD file not found: {scad_file}")
-        
-        # Read the existing SCAD file to determine its type
-        with open(scad_file, 'r') as f:
-            scad_code = f.read()
-        
-        # Determine model type from the code (simplified approach)
-        model_type = None
-        for shape_type in self.shape_templates:
-            if shape_type in scad_code.lower():
-                model_type = shape_type
-                break
-        
-        if not model_type:
-            raise ValueError("Could not determine model type from existing SCAD file")
-        
-        # Generate new SCAD code
-        new_scad_code = self.shape_templates[model_type](parameters)
-        
-        # Write updated SCAD code to file
-        with open(scad_file, 'w') as f:
-            f.write(new_scad_code)
-        
-        logger.info(f"Updated SCAD file: {scad_file}")
-        return scad_file
-    
-    def generate_stl(self, scad_file: str, parameters: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Generate an STL file from a SCAD file.
-        
-        Args:
-            scad_file: Path to the SCAD file
-            parameters: Optional parameters to override in the SCAD file
-            
-        Returns:
-            Path to the generated STL file
-        """
-        model_id = os.path.basename(scad_file).split('.')[0]
+        null_output = os.path.join(self.output_dir, "validate.stl")
+        result = self._run(["-o", null_output], scad_file, parameters, check=False)
+        if os.path.exists(null_output):
+            os.remove(null_output)
+        if result.returncode != 0:
+            raise OpenSCADError(
+                f"OpenSCAD rejected {os.path.basename(scad_file)}",
+                diagnostics=result.stderr.strip(),
+            )
+        return result.stderr.strip()
+
+    def generate_stl(self, scad_file: str, parameters: dict[str, Any] | None = None) -> str:
+        model_id = os.path.splitext(os.path.basename(scad_file))[0]
         stl_file = os.path.join(self.stl_dir, f"{model_id}.stl")
-        
-        # Build command
-        cmd = ["openscad", "-o", stl_file]
-        
-        # Add parameters if provided
-        if parameters:
-            for key, value in parameters.items():
-                cmd.extend(["-D", f"{key}={value}"])
-        
-        # Add input file
-        cmd.append(scad_file)
-        
-        # Run OpenSCAD
-        try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            logger.info(f"Generated STL file: {stl_file}")
-            logger.debug(result.stdout)
-            return stl_file
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error generating STL file: {e.stderr}")
-            raise RuntimeError(f"Failed to generate STL file: {e.stderr}")
-    
-    def generate_preview(self, scad_file: str, parameters: Optional[Dict[str, Any]] = None,
-                        camera_position: str = "0,0,0,0,0,0,50", 
-                        image_size: str = "800,600") -> str:
-        """
-        Generate a preview image from a SCAD file.
-        
-        Args:
-            scad_file: Path to the SCAD file
-            parameters: Optional parameters to override in the SCAD file
-            camera_position: Camera position in format "tx,ty,tz,rx,ry,rz,dist"
-            image_size: Image size in format "width,height"
-            
-        Returns:
-            Path to the generated preview image
-        """
-        model_id = os.path.basename(scad_file).split('.')[0]
-        preview_file = os.path.join(self.preview_dir, f"{model_id}.png")
-        
-        # Build command
-        cmd = ["openscad", "--camera", camera_position, "--imgsize", image_size, "-o", preview_file]
-        
-        # Add parameters if provided
-        if parameters:
-            for key, value in parameters.items():
-                cmd.extend(["-D", f"{key}={value}"])
-        
-        # Add input file
-        cmd.append(scad_file)
-        
-        # Run OpenSCAD
-        try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            logger.info(f"Generated preview image: {preview_file}")
-            logger.debug(result.stdout)
-            return preview_file
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error generating preview image: {e.stderr}")
-            # Since we know there might be issues with headless rendering, we'll create a placeholder
-            logger.warning("Using placeholder image due to rendering error")
-            return self._create_placeholder_image(preview_file)
-    
-    def _create_placeholder_image(self, output_path: str) -> str:
-        """Create a simple placeholder image when rendering fails."""
-        try:
-            from PIL import Image, ImageDraw, ImageFont
-            
-            # Create a blank image
-            img = Image.new('RGB', (800, 600), color=(240, 240, 240))
-            draw = ImageDraw.Draw(img)
-            
-            # Add text
-            draw.text((400, 300), "Preview not available", fill=(0, 0, 0))
-            
-            # Save the image
-            img.save(output_path)
-            return output_path
-        except Exception as e:
-            logger.error(f"Error creating placeholder image: {str(e)}")
-            # If all else fails, return the path anyway
-            return output_path
-            
-    def generate_multi_angle_previews(self, scad_file: str, parameters: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-        """
-        Generate preview images from multiple angles for a SCAD file.
-        
-        Args:
-            scad_file: Path to the SCAD file
-            parameters: Optional parameters to override in the SCAD file
-            
-        Returns:
-            Dictionary mapping view names to preview image paths
-        """
-        # Define camera positions for different views
-        camera_positions = {
-            "front": "0,0,0,0,0,0,50",
-            "top": "0,0,0,90,0,0,50",
-            "right": "0,0,0,0,90,0,50",
-            "perspective": "40,30,30,55,0,25,100"
+        self._run(["-o", stl_file], scad_file, parameters)
+        logger.info("Wrote %s", stl_file)
+        return stl_file
+
+    def generate_preview(
+        self,
+        scad_file: str,
+        parameters: dict[str, Any] | None = None,
+        camera_position: str = CAMERA_VIEWS["front"],
+        image_size: str = DEFAULT_IMAGE_SIZE,
+        suffix: str = "",
+    ) -> str:
+        model_id = os.path.splitext(os.path.basename(scad_file))[0]
+        preview_file = os.path.join(self.preview_dir, f"{model_id}{suffix}.png")
+        args = ["--camera", camera_position, "--imgsize", image_size, "-o", preview_file]
+        result = self._run(args, scad_file, parameters, check=False)
+        if result.returncode != 0 or not os.path.exists(preview_file):
+            logger.warning(
+                "Preview render failed for %s: %s", scad_file, result.stderr.strip()
+            )
+            return self._placeholder(preview_file, image_size)
+        return preview_file
+
+    def generate_multi_angle_previews(
+        self, scad_file: str, parameters: dict[str, Any] | None = None
+    ) -> dict[str, str]:
+        """Render the four standard camera angles."""
+        return {
+            view: self.generate_preview(
+                scad_file, parameters, camera_position=camera, suffix=f"_{view}"
+            )
+            for view, camera in CAMERA_VIEWS.items()
         }
-        
-        # Generate preview for each view
-        previews = {}
-        for view, camera_position in camera_positions.items():
-            try:
-                model_id = os.path.basename(scad_file).split('.')[0]
-                preview_file = os.path.join(self.preview_dir, f"{model_id}_{view}.png")
-                
-                # Build command
-                cmd = ["openscad", "--camera", camera_position, "--imgsize", "800,600", "-o", preview_file]
-                
-                # Add parameters if provided
-                if parameters:
-                    for key, value in parameters.items():
-                        cmd.extend(["-D", f"{key}={value}"])
-                
-                # Add input file
-                cmd.append(scad_file)
-                
-                # Run OpenSCAD
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                logger.info(f"Generated {view} preview: {preview_file}")
-                previews[view] = preview_file
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Error generating {view} preview: {e.stderr}")
-                # Create a placeholder image for this view
-                preview_file = os.path.join(self.preview_dir, f"{model_id}_{view}.png")
-                previews[view] = self._create_placeholder_image(preview_file)
-        
-        return previews
-    
-    # Template functions for basic shapes
-    
-    def _cube_template(self, params: Dict[str, Any]) -> str:
-        """Generate SCAD code for a cube."""
-        size_x = params.get('width', 10)
-        size_y = params.get('depth', 10)
-        size_z = params.get('height', 10)
-        center = params.get('center', 'false').lower() == 'true'
-        
-        return f"""// Cube
-// Parameters:
-//   width = {size_x}
-//   depth = {size_y}
-//   height = {size_z}
-//   center = {str(center).lower()}
 
-width = {size_x};
-depth = {size_y};
-height = {size_z};
-center = {str(center).lower()};
+    def _run(
+        self,
+        args: list[str],
+        scad_file: str,
+        parameters: dict[str, Any] | None,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess:
+        cmd = [self.openscad_path, *args]
+        for key, value in (parameters or {}).items():
+            cmd.extend(["-D", f"{key}={_scad_literal(value)}"])
+        cmd.append(scad_file)
 
-cube([width, depth, height], center=center);
-"""
-    
-    def _sphere_template(self, params: Dict[str, Any]) -> str:
-        """Generate SCAD code for a sphere."""
-        radius = params.get('radius', 10)
-        segments = params.get('segments', 32)
-        
-        return f"""// Sphere
-// Parameters:
-//   radius = {radius}
-//   segments = {segments}
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise OpenSCADNotFound(
+                f"Could not run {self.openscad_path!r}. Install OpenSCAD or set "
+                f"OPENSCAD_PATH to the executable."
+            ) from exc
 
-radius = {radius};
-$fn = {segments};
+        if check and result.returncode != 0:
+            raise OpenSCADError(
+                f"OpenSCAD exited with {result.returncode}",
+                diagnostics=result.stderr.strip(),
+            )
+        return result
 
-sphere(r=radius);
-"""
-    
-    def _cylinder_template(self, params: Dict[str, Any]) -> str:
-        """Generate SCAD code for a cylinder."""
-        radius = params.get('radius', 10)
-        height = params.get('height', 20)
-        center = params.get('center', 'false').lower() == 'true'
-        segments = params.get('segments', 32)
-        
-        return f"""// Cylinder
-// Parameters:
-//   radius = {radius}
-//   height = {height}
-//   center = {str(center).lower()}
-//   segments = {segments}
+    def _placeholder(self, output_path: str, image_size: str) -> str:
+        """Stand in for a render the headless environment could not produce."""
+        try:
+            from PIL import Image, ImageDraw
 
-radius = {radius};
-height = {height};
-center = {str(center).lower()};
-$fn = {segments};
+            width, height = (int(v) for v in image_size.split(","))
+            img = Image.new("RGB", (width, height), color=(240, 240, 240))
+            ImageDraw.Draw(img).text(
+                (width // 2 - 60, height // 2), "Preview not available", fill=(0, 0, 0)
+            )
+            img.save(output_path)
+        except Exception as exc:
+            logger.error("Could not write placeholder image: %s", exc)
+        return output_path
 
-cylinder(h=height, r=radius, center=center);
-"""
-    
-    def _box_template(self, params: Dict[str, Any]) -> str:
-        """Generate SCAD code for a hollow box."""
-        width = params.get('width', 30)
-        depth = params.get('depth', 20)
-        height = params.get('height', 15)
-        thickness = params.get('thickness', 2)
-        
-        return f"""// Hollow Box
-// Parameters:
-//   width = {width}
-//   depth = {depth}
-//   height = {height}
-//   thickness = {thickness}
 
-width = {width};
-depth = {depth};
-height = {height};
-thickness = {thickness};
-
-module box(width, depth, height, thickness) {{
-    difference() {{
-        cube([width, depth, height]);
-        translate([thickness, thickness, thickness])
-        cube([width - 2*thickness, depth - 2*thickness, height - thickness]);
-    }}
-}}
-
-box(width, depth, height, thickness);
-"""
-    
-    def _rounded_box_template(self, params: Dict[str, Any]) -> str:
-        """Generate SCAD code for a rounded box."""
-        width = params.get('width', 30)
-        depth = params.get('depth', 20)
-        height = params.get('height', 15)
-        radius = params.get('radius', 3)
-        segments = params.get('segments', 32)
-        
-        return f"""// Rounded Box
-// Parameters:
-//   width = {width}
-//   depth = {depth}
-//   height = {height}
-//   radius = {radius}
-//   segments = {segments}
-
-width = {width};
-depth = {depth};
-height = {height};
-radius = {radius};
-$fn = {segments};
-
-module rounded_box(width, depth, height, radius) {{
-    hull() {{
-        translate([radius, radius, radius])
-        sphere(r=radius);
-        
-        translate([width-radius, radius, radius])
-        sphere(r=radius);
-        
-        translate([radius, depth-radius, radius])
-        sphere(r=radius);
-        
-        translate([width-radius, depth-radius, radius])
-        sphere(r=radius);
-        
-        translate([radius, radius, height-radius])
-        sphere(r=radius);
-        
-        translate([width-radius, radius, height-radius])
-        sphere(r=radius);
-        
-        translate([radius, depth-radius, height-radius])
-        sphere(r=radius);
-        
-        translate([width-radius, depth-radius, height-radius])
-        sphere(r=radius);
-    }}
-}}
-
-rounded_box(width, depth, height, radius);
-"""
+def _scad_literal(value: Any) -> str:
+    """Render a Python value as an OpenSCAD -D literal."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return f'"{value}"'
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_scad_literal(v) for v in value) + "]"
+    return str(value)
