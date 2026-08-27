@@ -1,63 +1,41 @@
 <metadata>
-  author: devin-ai-integration
-  timestamp: 2025-03-21T01:30:00Z
-  version: 1.0.0
-  related-files: [/src/ai/ai_service.py, /src/nlp/parameter_extractor.py]
-  prompt: "Implement AI-driven code generator for OpenSCAD"
+  related-files: [/src/models/shape_library.py, /src/models/scad_templates/basic_shapes.scad]
+  decisions: [/rtfmd/decisions/client-supplied-reasoning.md]
 </metadata>
 
 <exploration>
-  The code generator was designed to translate natural language descriptions and extracted parameters into valid OpenSCAD code. Several approaches were considered:
-  
-  1. Direct string manipulation for code generation
-  2. Template-based approach with parameter substitution
-  3. Modular approach with separate modules for different shape types
-  
-  The modular approach was selected for its maintainability and extensibility.
+  The generator previously held a Python dict mapping shape names to module names
+  and another mapping natural-language parameter names to OpenSCAD ones. Both
+  drifted from basic_shapes.scad:
+
+  - torus was mapped to major_radius and minor_radius; the module takes
+    outer_radius and inner_radius.
+  - cone was mapped to base_radius; the module takes bottom_radius.
+  - triangular_prism and custom_shape were mapped to modules that do not exist.
+
+  _map_parameters passed names through without translating them, so those calls
+  reached OpenSCAD as arguments no module declared. Nothing detected this,
+  because the natural-language path fell back to a 10mm cube on any failure.
+
+  Two fixes were possible: correct the dict, or stop keeping one.
 </exploration>
 
-<mental-model>
-  The code generator operates on a "shape-to-module" mapping paradigm, where each identified shape type corresponds to a specific OpenSCAD module. This mental model allows for clean separation of concerns and makes it easy to add new shape types.
-</mental-model>
+<reasoning>
+  Correcting the dict fixes today's drift and invites tomorrow's. Any edit to
+  basic_shapes.scad can desynchronise it again, silently, with the failure
+  surfacing as a rejected OpenSCAD call.
 
-<pattern-recognition>
-  The implementation uses the Factory pattern for code generation, where different shape types are mapped to different module generators. This pattern allows for easy extension with new shape types.
-</pattern-recognition>
+  shape_library parses module signatures out of the .scad file instead. The
+  library is the single source of truth, so a renamed parameter changes the
+  validation, the defaults, the error message and the prompt text together.
 
-<trade-off>
-  Options considered:
-  1. Generating raw OpenSCAD primitives directly
-  2. Using a library of pre-defined modules
-  3. Hybrid approach with both primitives and modules
-  
-  The library approach was chosen because:
-  - More maintainable and readable code
-  - Easier to implement complex shapes
-  - Better parameter handling
-  - More consistent output
-</trade-off>
+  generate_code merges caller parameters over the parsed defaults and emits a
+  named variable per parameter, keeping the output parametric rather than
+  inlining numbers into the module call. Unknown names raise ValueError naming
+  the accepted ones, which the calling model reads and corrects.
 
-<domain-knowledge>
-  The implementation required understanding of:
-  - OpenSCAD syntax and semantics
-  - Constructive Solid Geometry (CSG) operations
-  - Parametric modeling concepts
-  - 3D geometry fundamentals
-</domain-knowledge>
-
-<technical-debt>
-  The current implementation has some limitations:
-  - Limited support for complex nested operations
-  - No support for custom user-defined modules
-  - Basic error handling for invalid parameters
-  
-  Future improvements planned:
-  - Enhanced error handling with meaningful messages
-  - Support for user-defined modules
-  - More sophisticated CSG operation chaining
-</technical-debt>
-
-<knowledge-refs>
-  [OpenSCAD Basics](/rtfmd/knowledge/openscad/openscad-basics.md) - Last updated 2025-03-21
-  [AI-Driven Code Generation](/rtfmd/decisions/ai-driven-code-generation.md) - Last updated 2025-03-21
-</knowledge-refs>
+  The AI branch is gone. It required an ai_service that was never constructed,
+  and main.py never passed the description argument that would have reached it,
+  so the code was unreachable in two independent ways. A caller that wants
+  arbitrary geometry writes SCAD and sends it to create_model_from_scad.
+</reasoning>

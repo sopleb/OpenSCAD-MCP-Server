@@ -1,294 +1,182 @@
 # OpenSCAD MCP Server
 
-A Model Context Protocol (MCP) server that enables users to generate 3D models from text descriptions or images, with a focus on creating parametric 3D models using multi-view reconstruction and OpenSCAD.
+Parametric 3D modelling with OpenSCAD, photogrammetric reconstruction, and 3D
+printing, exposed over the Model Context Protocol.
 
-## Features
+The server runs no AI model and holds no API key. Whatever client connects to it
+supplies the reasoning: Claude, Grok, Cursor, or anything else that speaks MCP.
+Point a different model at it and the behaviour is identical, with no
+configuration change.
 
-- **AI Image Generation**: Generate images from text descriptions using Google Gemini or Venice.ai APIs
-- **Multi-View Image Generation**: Create multiple views of the same 3D object for reconstruction
-- **Image Approval Workflow**: Review and approve/deny generated images before reconstruction
-- **3D Reconstruction**: Convert approved multi-view images into 3D models using CUDA Multi-View Stereo
-- **Remote Processing**: Process computationally intensive tasks on remote servers within your LAN
-- **OpenSCAD Integration**: Generate parametric 3D models using OpenSCAD
-- **Parametric Export**: Export models in formats that preserve parametric properties (CSG, AMF, 3MF, SCAD)
-- **3D Printer Discovery**: Optional network printer discovery and direct printing
+## What the calling model does, and what the server does
 
-## Architecture
+| The calling model | The server |
+|---|---|
+| Reads a request and decides on the geometry | Compiles OpenSCAD and returns diagnostics |
+| Writes SCAD source, or picks a library shape and its parameters | Validates parameters against the real module signatures |
+| Fixes what the compiler rejects and retries | Renders previews, exports STL, CSG, AMF, 3MF |
+| Interprets photographs and capture advice | Runs multi-view stereo on this machine |
 
-The server is built using the Python MCP SDK and follows a modular architecture:
+## Three ways a prompt reaches the caller
 
-```
-openscad-mcp-server/
-├── src/
-│   ├── main.py                  # Main application
-│   ├── main_remote.py           # Remote CUDA MVS server
-│   ├── ai/                      # AI integrations
-│   │   ├── gemini_api.py        # Google Gemini API for image generation
-│   │   └── venice_api.py        # Venice.ai API for image generation (optional)
-│   ├── models/                  # 3D model generation
-│   │   ├── cuda_mvs.py          # CUDA Multi-View Stereo integration
-│   │   └── code_generator.py    # OpenSCAD code generation
-│   ├── workflow/                # Workflow components
-│   │   ├── image_approval.py    # Image approval mechanism
-│   │   └── multi_view_to_model_pipeline.py  # Complete pipeline
-│   ├── remote/                  # Remote processing
-│   │   ├── cuda_mvs_client.py   # Client for remote CUDA MVS processing
-│   │   ├── cuda_mvs_server.py   # Server for remote CUDA MVS processing
-│   │   ├── connection_manager.py # Remote connection management
-│   │   └── error_handling.py    # Error handling for remote processing
-│   ├── openscad_wrapper/        # OpenSCAD CLI wrapper
-│   ├── visualization/           # Preview generation and web interface
-│   ├── utils/                   # Utility functions
-│   └── printer_discovery/       # 3D printer discovery
-├── scad/                        # Generated OpenSCAD files
-├── output/                      # Output files (models, previews)
-│   ├── images/                  # Generated images
-│   ├── multi_view/              # Multi-view images
-│   ├── approved_images/         # Approved images for reconstruction
-│   └── models/                  # Generated 3D models
-├── templates/                   # Web interface templates
-└── static/                      # Static files for web interface
+**Caller-authored input.** Tools take structured arguments or complete SCAD
+source. Turning "a 40mm vase with 3mm walls" into geometry happens in the
+client's model, as part of its ordinary tool call. Nothing routes anywhere else.
+
+**Registered prompts.** `design_scad_model`, `parametrize_scad`, and
+`plan_capture_setup` are MCP prompts. The server renders the text, the client's
+model runs it. In Claude Code they appear as `/mcp__openscad__design_scad_model`.
+
+**Deferred generation.** When a tool needs generated content mid-execution, it
+returns the prompt rather than calling out:
+
+```json
+{
+  "status": "needs_model_input",
+  "request_id": "req_a1b2c3d4e5f6",
+  "prompt": "...",
+  "response_schema": { "...": "..." },
+  "resume_with": "submit_model_input"
+}
 ```
 
-## Installation
+The caller answers and calls `submit_model_input`, which resumes the job.
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/jhacksman/OpenSCAD-MCP-Server.git
-   cd OpenSCAD-MCP-Server
-   ```
+### Why not MCP sampling
 
-2. Create a virtual environment:
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+`sampling/createMessage` looks like the natural fit, and it is the wrong tool
+here. The 2026-07-28 spec deprecated it (SEP-2577), and Claude Code does not
+implement it as a client, so a server built on sampling would fail against the
+most common caller. The same limitation shows up in elicitation: a transport
+without a back-channel cannot carry server-initiated requests at all, which is
+why `approve_images` hands the decision back to the caller when that happens.
+The three mechanisms above need no back-channel and work on every client today.
 
-3. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+## Installing
 
-4. Install OpenSCAD:
-   - Ubuntu/Debian: `sudo apt-get install openscad`
-   - macOS: `brew install openscad`
-   - Windows: Download from [openscad.org](https://openscad.org/downloads.html)
+```bash
+git clone https://github.com/sopleb/openscad-mcp-server.git
+cd openscad-mcp-server
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+```
 
-5. Install CUDA Multi-View Stereo:
-   ```
-   git clone https://github.com/fixstars/cuda-multi-view-stereo.git
-   cd cuda-multi-view-stereo
-   mkdir build && cd build
-   cmake ..
-   make
-   ```
+Install OpenSCAD:
 
-6. Set up API keys:
-   - Create a `.env` file in the root directory
-   - Add your API keys:
-     ```
-     GEMINI_API_KEY=your-gemini-api-key
-     VENICE_API_KEY=your-venice-api-key  # Optional
-     REMOTE_CUDA_MVS_API_KEY=your-remote-api-key  # For remote processing
-     ```
+- Debian and Ubuntu: `sudo apt-get install openscad`
+- macOS: `brew install --cask openscad`
+- Windows: from [openscad.org](https://openscad.org/downloads.html)
 
-## Remote Processing Setup
+If the binary is not on `PATH`, set `OPENSCAD_PATH` to it. No other
+configuration is required, and there is no `.env` to fill in.
 
-The server supports remote processing of computationally intensive tasks, particularly CUDA Multi-View Stereo reconstruction. This allows you to offload processing to more powerful machines within your LAN.
+## Connecting a client
 
-### Server Setup (on the machine with CUDA GPU)
+```bash
+claude mcp add openscad -- python -m src.main
+```
 
-1. Install CUDA Multi-View Stereo on the server machine:
-   ```
-   git clone https://github.com/fixstars/cuda-multi-view-stereo.git
-   cd cuda-multi-view-stereo
-   mkdir build && cd build
-   cmake ..
-   make
-   ```
+The server speaks stdio. Any MCP client that launches a subprocess works the
+same way.
 
-2. Start the remote CUDA MVS server:
-   ```
-   python src/main_remote.py
-   ```
+## Tools
 
-3. The server will automatically advertise itself on the local network using Zeroconf.
+**Modelling**
 
-### Client Configuration
+| Tool | Purpose |
+|---|---|
+| `list_shape_library` | Module names, parameters, and defaults from the SCAD library |
+| `create_model_from_scad` | Compile OpenSCAD source you wrote |
+| `create_model_from_shape` | Build one library shape from named parameters |
+| `combine_shapes` | Chain shapes with union, difference, intersection |
+| `render_previews` | Front, top, right, and perspective renders |
+| `export_model` | STL, CSG, AMF, 3MF, SCAD, OFF, DXF, SVG |
+| `get_model` | The stored record, including its SCAD source |
 
-1. Configure remote processing in your `.env` file:
-   ```
-   REMOTE_CUDA_MVS_ENABLED=True
-   REMOTE_CUDA_MVS_USE_LAN_DISCOVERY=True
-   REMOTE_CUDA_MVS_API_KEY=your-shared-secret-key
-   ```
+`create_model_from_scad` returns `status: "compile_error"` with the OpenSCAD
+diagnostics rather than failing, so the calling model can fix the reported line
+and call again.
 
-2. Alternatively, you can specify a server URL directly:
-   ```
-   REMOTE_CUDA_MVS_ENABLED=True
-   REMOTE_CUDA_MVS_USE_LAN_DISCOVERY=False
-   REMOTE_CUDA_MVS_SERVER_URL=http://server-ip:8765
-   REMOTE_CUDA_MVS_API_KEY=your-shared-secret-key
-   ```
+**Reconstruction**
 
-### Remote Processing Features
+| Tool | Purpose |
+|---|---|
+| `reconstruct_from_images` | Multi-view stereo over photographs, on this machine |
+| `approve_images` | Ask the user which captures to keep |
 
-- **Automatic Server Discovery**: Find CUDA MVS servers on your local network
-- **Job Management**: Upload images, track job status, and download results
-- **Fault Tolerance**: Automatic retries, circuit breaker pattern, and error tracking
-- **Authentication**: Secure API key authentication for all remote operations
-- **Health Monitoring**: Continuous server health checks and status reporting
+**Printing**
 
-## Usage
+`discover_printers`, `connect_to_printer`, `print_model`, `get_printer_status`,
+`cancel_print_job`.
 
-1. Start the server:
-   ```
-   python src/main.py
-   ```
+**Routing**
 
-2. The server will start on http://localhost:8000
+`submit_model_input` answers a `needs_model_input` request.
 
-3. Use the MCP tools to interact with the server:
+## Reconstruction
 
-   - **generate_image_gemini**: Generate an image using Google Gemini API
-     ```json
-     {
-       "prompt": "A low-poly rabbit with black background",
-       "model": "gemini-2.0-flash-exp-image-generation"
-     }
-     ```
+Reconstruction uses [CUDA Multi-View
+Stereo](https://github.com/fixstars/cuda-multi-view-stereo), a compiled
+patch-match stereo binary. It runs locally, contacts nothing, and needs no key.
 
-   - **generate_multi_view_images**: Generate multiple views of the same 3D object
-     ```json
-     {
-       "prompt": "A low-poly rabbit",
-       "num_views": 4
-     }
-     ```
+```bash
+git clone https://github.com/fixstars/cuda-multi-view-stereo.git
+cd cuda-multi-view-stereo && mkdir build && cd build
+cmake .. && make
+export CUDA_MVS_PATH=/path/to/cuda-multi-view-stereo
+```
 
-   - **create_3d_model_from_images**: Create a 3D model from approved multi-view images
-     ```json
-     {
-       "image_ids": ["view_1", "view_2", "view_3", "view_4"],
-       "output_name": "rabbit_model"
-     }
-     ```
+This is photogrammetry, so it needs real photographs of one rigid object taken
+from different positions, along with camera poses that have a baseline between
+them. Pass poses directly as `camera_params`, or point `colmap_sparse_dir` at a
+COLMAP `sparse/0` directory:
 
-   - **create_3d_model_from_text**: Complete pipeline from text to 3D model
-     ```json
-     {
-       "prompt": "A low-poly rabbit",
-       "num_views": 4
-     }
-     ```
+```bash
+colmap automatic_reconstructor --workspace_path ./capture --image_path ./capture/images
+```
 
-   - **export_model**: Export a model to a specific format
-     ```json
-     {
-       "model_id": "your-model-id",
-       "format": "obj"  // or "stl", "ply", "scad", etc.
-     }
-     ```
+A pose set whose views share a camera centre is rejected, because zero baseline
+makes triangulation impossible. `plan_capture_setup` walks a user through
+shooting a usable set.
 
-   - **discover_remote_cuda_mvs_servers**: Find CUDA MVS servers on your network
-     ```json
-     {
-       "timeout": 5
-     }
-     ```
+Generated images do not reconstruct. Model-produced views of "the same object"
+are not views of the same object, and multi-view stereo has nothing to
+triangulate from them. The server no longer offers image generation for this
+reason, among others: an MCP server cannot ask Claude or Grok for an image
+anyway.
 
-   - **get_remote_job_status**: Check the status of a remote processing job
-     ```json
-     {
-       "server_id": "server-id",
-       "job_id": "job-id"
-     }
-     ```
+Optional LAN offload to a machine with a GPU is available through
+`REMOTE_CUDA_MVS_ENABLED`; see `src/remote/`. That server is your own
+infrastructure, and its `REMOTE_CUDA_MVS_API_KEY` authenticates to it, not to a
+model provider.
 
-   - **download_remote_model_result**: Download a completed model from a remote server
-     ```json
-     {
-       "server_id": "server-id",
-       "job_id": "job-id",
-       "output_name": "model-name"
-     }
-     ```
+## Configuration
 
-   - **discover_printers**: Discover 3D printers on the network
-     ```json
-     {}
-     ```
+Every setting has a working default. All are optional.
 
-   - **print_model**: Print a model on a connected printer
-     ```json
-     {
-       "model_id": "your-model-id",
-       "printer_id": "your-printer-id"
-     }
-     ```
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENSCAD_PATH` | `openscad` | OpenSCAD executable |
+| `CUDA_MVS_PATH` | `./cuda-mvs` | CUDA MVS checkout |
+| `REMOTE_CUDA_MVS_ENABLED` | `False` | Offload reconstruction to a LAN server |
+| `IMAGE_APPROVAL_MIN_IMAGES` | `3` | Approvals needed before reconstructing |
+| `DELEGATION_TTL_SECONDS` | `900` | How long a deferred request stays resumable |
 
-## Image Generation Options
+## Tests
 
-The server supports multiple image generation options:
+```bash
+pytest
+```
 
-1. **Google Gemini API** (Default): Uses the Gemini 2.0 Flash Experimental model for high-quality image generation
-   - Supports multi-view generation with consistent style
-   - Requires a Google Gemini API key
+Tests drive the server through a real MCP client session. Cases needing OpenSCAD
+or open3d skip when those are absent. `tests/test_no_external_ai.py` greps the
+source for provider hosts and API keys, so reintroducing one fails the suite.
 
-2. **Venice.ai API** (Optional): Alternative image generation service
-   - Supports various models including flux-dev and fluently-xl
-   - Requires a Venice.ai API key
+## Export formats
 
-3. **User-Provided Images**: Skip image generation and use your own images
-   - Upload images directly to the server
-   - Useful for working with existing photographs or renders
-
-## Multi-View Workflow
-
-The server implements a multi-view workflow for 3D reconstruction:
-
-1. **Image Generation**: Generate multiple views of the same 3D object
-2. **Image Approval**: Review and approve/deny each generated image
-3. **3D Reconstruction**: Convert approved images into a 3D model using CUDA MVS
-   - Can be processed locally or on a remote server within your LAN
-4. **Model Refinement**: Optionally refine the model using OpenSCAD
-
-## Remote Processing Workflow
-
-The remote processing workflow allows you to offload computationally intensive tasks to more powerful machines:
-
-1. **Server Discovery**: Automatically discover CUDA MVS servers on your network
-2. **Image Upload**: Upload approved multi-view images to the remote server
-3. **Job Processing**: Process the images on the remote server using CUDA MVS
-4. **Status Tracking**: Monitor the job status and progress
-5. **Result Download**: Download the completed 3D model when processing is finished
-
-## Supported Export Formats
-
-The server supports exporting models in various formats:
-
-- **OBJ**: Wavefront OBJ format (standard 3D model format)
-- **STL**: Standard Triangle Language (for 3D printing)
-- **PLY**: Polygon File Format (for point clouds and meshes)
-- **SCAD**: OpenSCAD source code (for parametric models)
-- **CSG**: OpenSCAD CSG format (preserves all parametric properties)
-- **AMF**: Additive Manufacturing File Format (preserves some metadata)
-- **3MF**: 3D Manufacturing Format (modern replacement for STL with metadata)
-
-## Web Interface
-
-The server provides a web interface for:
-
-- Generating and approving multi-view images
-- Previewing 3D models from different angles
-- Downloading models in various formats
-
-Access the interface at http://localhost:8000/ui/
+CSG, SCAD, AMF, and 3MF keep parametric detail. STL and OFF are meshes. DXF and
+SVG are for 2D work.
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.

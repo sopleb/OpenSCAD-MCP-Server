@@ -1,148 +1,81 @@
-"""
-Image approval tool for MCP clients.
+"""Image approval backed by MCP elicitation.
+
+The user decides which captured views feed reconstruction. The server asks
+through the connected client rather than through a web page of its own.
 """
 
-import os
+import glob
 import logging
+import os
 import shutil
-from typing import Dict, Any, List, Optional
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+
+class ApprovalResponse(BaseModel):
+    """Elicitation schema. Fields stay primitive; nested models are rejected."""
+
+    approved: bool = Field(description="Use this image for reconstruction?")
+    reason: str = Field(default="", description="Optional note about the decision")
+
+
 class ImageApprovalTool:
-    """
-    Tool for image approval/denial in MCP clients.
-    """
-    
+    """Stores approved images and asks the user about the rest."""
+
     def __init__(self, output_dir: str = "output/approved_images"):
-        """
-        Initialize the image approval tool.
-        
-        Args:
-            output_dir: Directory to store approved images
-        """
         self.output_dir = output_dir
-        
-        # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
-    
-    def present_image_for_approval(self, image_path: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+
+    async def request_approval(self, ctx, image_path: str, label: str = "") -> dict[str, Any]:
+        """Ask the user whether to keep one image.
+
+        Returns a dict carrying `action` (accept, decline, cancel), `approved`,
+        and `approved_path` when the image was copied.
         """
-        Present an image to the user for approval.
-        
-        Args:
-            image_path: Path to the image
-            metadata: Optional metadata about the image
-            
-        Returns:
-            Dictionary with image path and approval request ID
-        """
-        # For MCP server, we just prepare the response
-        # The actual approval is handled by the client
-        
-        approval_id = os.path.basename(image_path).split('.')[0]
-        
-        return {
-            "approval_id": approval_id,
-            "image_path": image_path,
-            "image_url": f"/images/{os.path.basename(image_path)}",
-            "metadata": metadata or {}
-        }
-    
-    def process_approval(self, approval_id: str, approved: bool, image_path: str) -> Dict[str, Any]:
-        """
-        Process user's approval or denial of an image.
-        
-        Args:
-            approval_id: ID of the approval request
-            approved: Whether the image was approved
-            image_path: Path to the image
-            
-        Returns:
-            Dictionary with approval status and image path
-        """
-        if approved:
-            # Copy approved image to output directory
-            approved_path = os.path.join(self.output_dir, os.path.basename(image_path))
-            os.makedirs(os.path.dirname(approved_path), exist_ok=True)
-            shutil.copy2(image_path, approved_path)
-            
+        name = label or os.path.basename(image_path)
+        result = await ctx.elicit(
+            message=f"Use {name} for 3D reconstruction?",
+            schema=ApprovalResponse,
+        )
+
+        if result.action != "accept":
+            logger.info("Approval for %s ended with %s", name, result.action)
+            return {"action": result.action, "approved": False, "image_path": image_path}
+
+        if not result.data.approved:
             return {
-                "approval_id": approval_id,
-                "approved": True,
-                "original_path": image_path,
-                "approved_path": approved_path
-            }
-        else:
-            return {
-                "approval_id": approval_id,
+                "action": "accept",
                 "approved": False,
-                "original_path": image_path
+                "image_path": image_path,
+                "reason": result.data.reason,
             }
-    
-    def get_approved_images(self, filter_pattern: Optional[str] = None) -> List[str]:
-        """
-        Get list of approved images.
-        
-        Args:
-            filter_pattern: Optional pattern to filter image names
-            
-        Returns:
-            List of paths to approved images
-        """
-        import glob
-        
-        if filter_pattern:
-            pattern = os.path.join(self.output_dir, filter_pattern)
-        else:
-            pattern = os.path.join(self.output_dir, "*")
-        
-        return glob.glob(pattern)
-    
-    def get_approval_status(self, approval_id: str) -> Dict[str, Any]:
-        """
-        Get the approval status for a specific approval ID.
-        
-        Args:
-            approval_id: ID of the approval request
-            
-        Returns:
-            Dictionary with approval status
-        """
-        # Check if any approved image matches the approval ID
-        approved_images = self.get_approved_images()
-        
-        for image_path in approved_images:
-            if approval_id in os.path.basename(image_path):
-                return {
-                    "approval_id": approval_id,
-                    "approved": True,
-                    "approved_path": image_path
-                }
-        
+
         return {
-            "approval_id": approval_id,
-            "approved": False
+            "action": "accept",
+            "approved": True,
+            "image_path": image_path,
+            "approved_path": self.accept(image_path),
+            "reason": result.data.reason,
         }
-    
-    def batch_process_approvals(self, approvals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Process multiple approvals at once.
-        
-        Args:
-            approvals: List of dictionaries with approval_id, approved, and image_path
-            
-        Returns:
-            List of dictionaries with approval results
-        """
-        results = []
-        
-        for approval in approvals:
-            result = self.process_approval(
-                approval_id=approval["approval_id"],
-                approved=approval["approved"],
-                image_path=approval["image_path"]
-            )
-            results.append(result)
-        
-        return results
+
+    def accept(self, image_path: str) -> str:
+        """Copy an image into the approved set and return its new path."""
+        approved_path = os.path.join(self.output_dir, os.path.basename(image_path))
+        os.makedirs(self.output_dir, exist_ok=True)
+        shutil.copy2(image_path, approved_path)
+        return approved_path
+
+    def get_approved_images(self, filter_pattern: str | None = None) -> list[str]:
+        pattern = os.path.join(self.output_dir, filter_pattern or "*")
+        return sorted(glob.glob(pattern))
+
+    def clear(self) -> int:
+        """Empty the approved set. Returns how many files were removed."""
+        removed = 0
+        for path in self.get_approved_images():
+            os.remove(path)
+            removed += 1
+        return removed
